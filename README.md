@@ -153,11 +153,11 @@ The `controller` macro will generated the following for you:
       representing the previous and new values of the field, respectively.
     * Type named `<struct-name><field-name-in-pascal-case>` (so `ControllerState` for
       `state` field), which implements `futures::Stream`, yielding each state change as the change
-       struct described above.
+      struct described above.
 * `run` method with signature `pub async fn run(&mut self);` which runs the controller logic,
-   proxying calls from the client to the implementations here and their return value back to
-   the clients (internally via channels). Typically you'd call it at the end of your `main`
-   or run it as a task.
+  proxying calls from the client to the implementations here and their return value back to
+  the clients (internally via channels). Typically you'd call it at the end of your `main`
+  or run it as a task.
 * Client-side API for this struct, named `<struct-name>Client` (`ControllerClient` here)
   which provides exactly the same methods (except signal methods) defined in this implementation
   that other parts of the code use to call these methods.
