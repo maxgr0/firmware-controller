@@ -20,15 +20,13 @@ heapless = { version = "0.7", default-features = false }
 futures = { version = "0.3", default-features = false, features = [
     "async-await",
 ] }
-embassy-sync = { git = "https://github.com/jucr-io/embassy/" }
-embassy-executor = { git = "https://github.com/jucr-io/embassy/", features = [
-    "task-arena-size-32768",
+embassy-sync = "0.7.2"
+embassy-executor = { version = "0.9.1", features = [
     "arch-std",
     "executor-thread",
     "defmt",
-    "integrated-timers",
 ] }
-embassy-time = { git = "https://github.com/jucr-io/embassy/", features = [
+embassy-time = { version = "0.5.0", features = [
     "defmt",
     "defmt-timestamp-uptime",
     "tick-hz-32_768",
