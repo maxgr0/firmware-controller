@@ -1,3 +1,9 @@
+# 0.2.0 (Nov 17th, 2025)
+
+* Update info in `Cargo.toml`.
+* Port to latest embassy releases.
+* Add missing changelog entry for 0.1.1.
+
 # 0.1.1 (Sep 22nd, 2025)
 
 * Add repository link to `Cargo.toml`.
