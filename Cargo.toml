@@ -1,11 +1,14 @@
 [package]
 name = "firmware-controller"
 description = "Controller to decouple interactions between components in a no_std environment."
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
-authors = ["JUCR GmbH <engineering@jucr.com>"]
+authors = [
+    "Zeeshan Ali Khan <zeenix@gmail.com>",
+    "Max Grollmann <max@grollmann.com>",
+]
 license = "MIT"
-repository = "https://github.com/maxgr0/firmware-controller/"
+repository = "https://github.com/layerx-world/firmware-controller/"
 
 [lib]
 proc-macro = true
