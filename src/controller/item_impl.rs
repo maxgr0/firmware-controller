@@ -31,13 +31,30 @@ pub(crate) fn expand(
     let args_channels_rx_tx = methods.clone().map(|m| &m.args_channels_rx_tx);
     let select_arms = methods.clone().map(|m| &m.select_arm);
 
+    // Generate public setters for published fields with pub_setter.
+    let pub_setters: Vec<_> = published_fields
+        .iter()
+        .filter(|field| field.pub_setter)
+        .map(|field| generate_pub_setter(field, &struct_name))
+        .collect();
+    let pub_setter_channel_declarations = pub_setters.iter().map(|s| &s.channel_declarations);
+    let pub_setter_rx_tx = pub_setters.iter().map(|s| &s.rx_tx);
+    let pub_setter_select_arms = pub_setters.iter().map(|s| &s.select_arm);
+    let pub_setter_client_methods = pub_setters.iter().map(|s| &s.client_method);
+    let pub_setter_client_tx_rx_declarations =
+        pub_setters.iter().map(|s| &s.client_tx_rx_declarations);
+    let pub_setter_client_tx_rx_initializations =
+        pub_setters.iter().map(|s| &s.client_tx_rx_initializations);
+
     let run_method = quote! {
         pub async fn run(mut self) {
             #(#args_channels_rx_tx)*
+            #(#pub_setter_rx_tx)*
 
             loop {
                 futures::select_biased! {
-                    #(#select_arms),*
+                    #(#select_arms,)*
+                    #(#pub_setter_select_arms),*
                 }
             }
         }
@@ -79,21 +96,26 @@ pub(crate) fn expand(
 
     Ok(quote! {
         #(#args_channel_declarations)*
+        #(#pub_setter_channel_declarations)*
 
         #input
 
         pub struct #client_name {
             #(#client_method_tx_rx_declarations)*
+            #(#pub_setter_client_tx_rx_declarations)*
         }
 
         impl #client_name {
             pub fn new() -> Self {
                 Self {
                     #(#client_method_tx_rx_initializations)*
+                    #(#pub_setter_client_tx_rx_initializations)*
                 }
             }
 
             #(#client_methods)*
+
+            #(#pub_setter_client_methods)*
 
             #(#published_field_getters)*
 
@@ -565,5 +587,111 @@ impl MethodInputArgs {
             types: in_types,
             names: in_names,
         })
+    }
+}
+
+#[derive(Debug)]
+struct PubSetter {
+    channel_declarations: TokenStream,
+    rx_tx: TokenStream,
+    select_arm: TokenStream,
+    client_method: TokenStream,
+    client_tx_rx_declarations: TokenStream,
+    client_tx_rx_initializations: TokenStream,
+}
+
+fn generate_pub_setter(field: &PublishedFieldInfo, struct_name: &Ident) -> PubSetter {
+    let field_name = &field.field_name;
+    let field_type = &field.field_type;
+    let setter_method_name = &field.setter_name;
+    let field_name_str = field_name.to_string();
+
+    let struct_name_caps = struct_name.to_string().to_uppercase();
+    let field_name_caps = field_name_str.to_uppercase();
+    let input_channel_name = Ident::new(
+        &format!("{}_SET_{}_INPUT_CHANNEL", struct_name_caps, field_name_caps),
+        field_name.span(),
+    );
+    let output_channel_name = Ident::new(
+        &format!(
+            "{}_SET_{}_OUTPUT_CHANNEL",
+            struct_name_caps, field_name_caps
+        ),
+        field_name.span(),
+    );
+    let capacity = super::ALL_CHANNEL_CAPACITY;
+
+    let channel_declarations = quote! {
+        static #input_channel_name:
+            embassy_sync::channel::Channel<
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                #field_type,
+                #capacity,
+            > = embassy_sync::channel::Channel::new();
+        static #output_channel_name:
+            embassy_sync::channel::Channel<
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                (),
+                #capacity,
+            > = embassy_sync::channel::Channel::new();
+    };
+
+    let input_channel_rx_name =
+        Ident::new(&format!("{}_value_rx", field_name_str), field_name.span());
+    let output_channel_tx_name =
+        Ident::new(&format!("{}_ack_tx", field_name_str), field_name.span());
+    let rx_tx = quote! {
+        let #input_channel_rx_name = embassy_sync::channel::Channel::receiver(&#input_channel_name);
+        let #output_channel_tx_name = embassy_sync::channel::Channel::sender(&#output_channel_name);
+    };
+
+    let select_arm = quote! {
+        value = futures::FutureExt::fuse(
+            embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
+        ) => {
+            self.#setter_method_name(value).await;
+
+            embassy_sync::channel::Sender::send(&#output_channel_tx_name, ()).await;
+        }
+    };
+
+    let input_channel_tx_name =
+        Ident::new(&format!("{}_value_tx", field_name_str), field_name.span());
+    let output_channel_rx_name =
+        Ident::new(&format!("{}_ack_rx", field_name_str), field_name.span());
+    let client_method = quote! {
+        pub async fn #setter_method_name(&self, value: #field_type) {
+            embassy_sync::channel::Sender::send(&self.#input_channel_tx_name, value).await;
+            embassy_sync::channel::Receiver::receive(&self.#output_channel_rx_name).await
+        }
+    };
+
+    let client_tx_rx_declarations = quote! {
+        #input_channel_tx_name: embassy_sync::channel::Sender<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            #field_type,
+            #capacity,
+        >,
+        #output_channel_rx_name: embassy_sync::channel::Receiver<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            (),
+            #capacity,
+        >
+    };
+
+    let client_tx_rx_initializations = quote! {
+        #input_channel_tx_name: embassy_sync::channel::Channel::sender(&#input_channel_name),
+        #output_channel_rx_name: embassy_sync::channel::Channel::receiver(&#output_channel_name)
+    };
+
+    PubSetter {
+        channel_declarations,
+        rx_tx,
+        select_arm,
+        client_method,
+        client_tx_rx_declarations,
+        client_tx_rx_initializations,
     }
 }

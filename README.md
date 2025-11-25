@@ -171,6 +171,9 @@ methods:
   * `receive_<field-name>_changed()` method (e.g., `receive_state_changed()`) that returns a
     stream of state changes. The stream yields `<struct-name><field-name-in-pascal-case>Changed`
     structs (e.g., `ControllerStateChanged`) containing `previous` and `new` fields.
+  * If the field is marked with `#[controller(publish(pub_setter))]`, a public
+    `set_<field-name>()` method (e.g., `set_state()`) is also generated on the client, allowing
+    external code to update the field value through the client API.
 * For each `signal` method:
   * `receive_<method-name>()` method (e.g., `receive_power_error()`) that returns a stream of
     signal events. The stream yields `<struct-name><method-name-in-pascal-case>Args` structs

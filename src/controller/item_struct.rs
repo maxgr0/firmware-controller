@@ -1,13 +1,16 @@
 use crate::util::*;
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{spanned::Spanned, Field, Fields, Ident, ItemStruct, Result};
+use syn::{spanned::Spanned, Field, Fields, Ident, ItemStruct, Result, Token};
 
 /// Information about a published field, to be used by impl processing.
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedFieldInfo {
     pub field_name: Ident,
+    pub field_type: syn::Type,
+    pub setter_name: Ident,
     pub subscriber_struct_name: Ident,
+    pub pub_setter: bool,
 }
 
 /// Result of expanding a struct.
@@ -195,6 +198,7 @@ impl PublishedField {
             Some(attr) => attr,
             None => return Ok(None),
         };
+        let mut pub_setter = false;
         attr.parse_nested_meta(|meta| {
             if !meta.path.is_ident("publish") {
                 let e = format!(
@@ -203,6 +207,25 @@ impl PublishedField {
                 );
 
                 return Err(syn::Error::new_spanned(attr, e));
+            }
+
+            if meta.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                while !content.is_empty() {
+                    let nested_ident: Ident = content.parse()?;
+                    if nested_ident == "pub_setter" {
+                        pub_setter = true;
+                    } else {
+                        let e =
+                            format!("expected `pub_setter` attribute, found `{}`", nested_ident);
+                        return Err(syn::Error::new_spanned(&nested_ident, e));
+                    }
+
+                    if !content.is_empty() {
+                        content.parse::<Token![,]>()?;
+                    }
+                }
             }
 
             Ok(())
@@ -233,6 +256,7 @@ impl PublishedField {
         let max_subscribers = super::BROADCAST_MAX_SUBSCRIBERS;
         let max_publishers = super::BROADCAST_MAX_PUBLISHERS;
 
+        let setter_name = Ident::new(&format!("set_{field_name_str}"), field.span());
         let publisher_name = Ident::new(&format!("{field_name_str}_publisher"), field.span());
         let publisher_field_declaration = quote! {
             #publisher_name:
@@ -249,7 +273,6 @@ impl PublishedField {
             // We only create one publisher so we can't fail.
             #publisher_name: embassy_sync::pubsub::PubSubChannel::publisher(&#publish_channel_name).unwrap()
         };
-        let setter_name = Ident::new(&format!("set_{field_name_str}"), field.span());
         let setter = quote! {
             pub async fn #setter_name(&mut self, mut value: #ty) {
                 core::mem::swap(&mut self.#field_name, &mut value);
@@ -317,7 +340,10 @@ impl PublishedField {
 
         let info = PublishedFieldInfo {
             field_name: field_name.clone(),
+            field_type: ty.clone(),
+            setter_name: setter_name.clone(),
             subscriber_struct_name: subscriber_struct_name.clone(),
+            pub_setter,
         };
 
         Ok(Some(PublishedField {
