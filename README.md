@@ -39,52 +39,57 @@ pub enum State {
     Disabled,
 }
 
-// The controller struct. This is where you define the state of your firmware.
 #[controller]
-pub struct Controller {
-    #[controller(publish)]
-    state: State,
-    // Other fields. Note: No all of them need to be published.
-}
+mod controller {
+    use super::*;
 
-// The controller implementation. This is where you define the logic of your firmware.
-#[controller]
-impl Controller {
-    // The `signal` attribute marks this method signature (note: no implementation body) as a
-    // signal, that you can use to notify other parts of your code about specific events.
-    #[controller(signal)]
-    pub async fn power_error(&self, description: heapless::String<64>);
+    // The controller struct. This is where you define the state of your firmware.
+    pub struct Controller {
+        #[controller(publish)]
+        state: State,
+        // Other fields. Note: Not all of them need to be published.
+    }
 
-    pub async fn enable_power(&mut self) -> Result<(), MyFirmwareError> {
-        if self.state != State::Disabled {
-            return Err(MyFirmwareError::InvalidState);
+    // The controller implementation. This is where you define the logic of your firmware.
+    impl Controller {
+        // The `signal` attribute marks this method signature (note: no implementation body) as a
+        // signal, that you can use to notify other parts of your code about specific events.
+        #[controller(signal)]
+        pub async fn power_error(&self, description: heapless::String<64>);
+
+        pub async fn enable_power(&mut self) -> Result<(), MyFirmwareError> {
+            if self.state != State::Disabled {
+                return Err(MyFirmwareError::InvalidState);
+            }
+
+            // Any other logic you want to run when enabling power.
+
+            self.set_state(State::Enabled).await;
+            self.power_error("Dummy error just for the showcase".try_into().unwrap())
+                .await;
+
+            Ok(())
         }
 
-        // Any other logic you want to run when enabling power.
+        pub async fn disable_power(&mut self) -> Result<(), MyFirmwareError> {
+            if self.state != State::Enabled {
+                return Err(MyFirmwareError::InvalidState);
+            }
 
-        self.set_state(State::Enabled).await;
-        self.power_error("Dummy error just for the showcase".try_into().unwrap())
-            .await;
+            // Any other logic you want to run when enabling power.
 
-        Ok(())
-    }
+            self.set_state(State::Disabled).await;
 
-    pub async fn disable_power(&mut self) -> Result<(), MyFirmwareError> {
-        if self.state != State::Enabled {
-            return Err(MyFirmwareError::InvalidState);
+            Ok(())
         }
 
-        // Any other logic you want to run when enabling power.
-
-        self.set_state(State::Disabled).await;
-
-        Ok(())
-    }
-
-    // Method that doesn't return anything.
-    pub async fn return_nothing(&self) {
+        // Method that doesn't return anything.
+        pub async fn return_nothing(&self) {
+        }
     }
 }
+
+use controller::*;
 
 #[embassy_executor::main]
 async fn main(spawner: embassy_executor::Spawner) {
@@ -104,9 +109,8 @@ async fn client() {
     use embassy_time::{Timer, Duration};
 
     let mut client = ControllerClient::new();
-    // SAFETY: We don't create more than 16 instances so we won't panic.
-    let state_changed = ControllerState::new().unwrap().map(Either::Left);
-    let error_stream = ControllerPowerError::new().unwrap().map(Either::Right);
+    let state_changed = client.receive_state_changed().unwrap().map(Either::Left);
+    let error_stream = client.receive_power_error().unwrap().map(Either::Right);
     let mut stream = select(state_changed, error_stream);
 
     client.enable_power().await.unwrap();
@@ -141,34 +145,39 @@ async fn client() {
 
 # Details
 
-The `controller` macro will generated the following for you:
+The `controller` macro will generate the following for you:
+
+## Controller struct
 
 * A `new` method that takes the fields of the struct as arguments and returns the struct.
 * For each `published` field:
-  * Setter for this field, named `set_<field-name>` (so`set_state` here), which broadcasts any
+  * Setter for this field, named `set_<field-name>` (e.g., `set_state`), which broadcasts any
     changes made to this field.
-  * Two client-side types:
-    * struct named `<struct-name><field-name-in-pascal-case>Changed` (so `ControllerStateChanged`
-      for `state` field), containing two public fields, named `previous` and `new` fields
-      representing the previous and new values of the field, respectively.
-    * Type named `<struct-name><field-name-in-pascal-case>` (so `ControllerState` for
-      `state` field), which implements `futures::Stream`, yielding each state change as the change
-      struct described above.
-* `run` method with signature `pub async fn run(&mut self);` which runs the controller logic,
-  proxying calls from the client to the implementations here and their return value back to
-  the clients (internally via channels). Typically you'd call it at the end of your `main`
-  or run it as a task.
-* Client-side API for this struct, named `<struct-name>Client` (`ControllerClient` here)
-  which provides exactly the same methods (except signal methods) defined in this implementation
-  that other parts of the code use to call these methods.
+* A `run` method with signature `pub async fn run(mut self);` which runs the controller logic,
+  proxying calls from the client to the implementations and their return values back to the
+  clients (internally via channels). Typically you'd call it at the end of your `main` or run it
+  as a task.
 * For each `signal` method:
-  * The method body, that broadcasts the signal to all the clients that are listening to it.
-  * Two client-side types:
-    * struct, named `<struct-name><method-name-in-pascal-case>Args` (`ControllerPowerErrorArgs`
-      here), containing all the arguments of this method, as public fields.
-    * Type named `<struct-name><method-name-in-pascal-case>` (`ControllerPowerError` here) which
-      implements `futures::Stream`, yielding each signal broadcasted as the args struct described
-      above.
+  * The method body, that broadcasts the signal to all clients that are listening to it.
+
+## Client API
+
+A client struct named `<struct-name>Client` (`ControllerClient` in the example) with the following
+methods:
+
+* All methods defined in the controller impl (except signal methods), which proxy calls to the
+  controller and return the results.
+* For each `published` field:
+  * `receive_<field-name>_changed()` method (e.g., `receive_state_changed()`) that returns a
+    stream of state changes. The stream yields `<struct-name><field-name-in-pascal-case>Changed`
+    structs (e.g., `ControllerStateChanged`) containing `previous` and `new` fields.
+  * If the field is marked with `#[controller(publish(pub_setter))]`, a public
+    `set_<field-name>()` method (e.g., `set_state()`) is also generated on the client, allowing
+    external code to update the field value through the client API.
+* For each `signal` method:
+  * `receive_<method-name>()` method (e.g., `receive_power_error()`) that returns a stream of
+    signal events. The stream yields `<struct-name><method-name-in-pascal-case>Args` structs
+    (e.g., `ControllerPowerErrorArgs`) containing all signal arguments as public fields.
 
 ## Dependencies assumed
 
