@@ -3,7 +3,20 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{spanned::Spanned, Field, Fields, Ident, ItemStruct, Result};
 
-pub(crate) fn expand(mut input: ItemStruct) -> Result<TokenStream> {
+/// Information about a published field, to be used by impl processing.
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedFieldInfo {
+    pub field_name: Ident,
+    pub subscriber_struct_name: Ident,
+}
+
+/// Result of expanding a struct.
+pub(crate) struct ExpandedStruct {
+    pub tokens: TokenStream,
+    pub published_fields: Vec<PublishedFieldInfo>,
+}
+
+pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
     let struct_name = &input.ident;
 
     let fields = StructFields::parse(&mut input.fields, struct_name)?;
@@ -14,14 +27,16 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<TokenStream> {
         publisher_fields_initializations,
         setters,
         subscriber_declarations,
+        published_fields_info,
     ) = fields.published().fold(
-        (quote!(), quote!(), quote!(), quote!(), quote!()),
+        (quote!(), quote!(), quote!(), quote!(), quote!(), Vec::new()),
         |(
             publish_channels,
             publisher_fields_declarations,
             publisher_fields_initializations,
             setters,
             subscribers,
+            mut infos,
         ),
          f| {
             let (publish_channel, publisher_field, publisher_field_init, setter, subscriber) = (
@@ -32,39 +47,45 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<TokenStream> {
                 &f.subscriber_declaration,
             );
 
+            infos.push(f.info.clone());
+
             (
                 quote! { #publish_channels #publish_channel },
                 quote! { #publisher_fields_declarations #publisher_field, },
                 quote! { #publisher_fields_initializations #publisher_field_init, },
                 quote! { #setters #setter },
                 quote! { #subscribers #subscriber },
+                infos,
             )
         },
     );
     let fields = fields.raw_fields().collect::<Vec<_>>();
     let vis = &input.vis;
 
-    Ok(quote! {
-        #vis struct #struct_name {
-            #(#fields),*,
-            #publisher_fields_declarations
-        }
-
-        impl #struct_name {
-            #[allow(clippy::too_many_arguments)]
-            pub fn new(#(#fields),*) -> Self {
-                Self {
-                    #(#field_names),*,
-                    #publisher_fields_initializations
-                }
+    Ok(ExpandedStruct {
+        tokens: quote! {
+            #vis struct #struct_name {
+                #(#fields),*,
+                #publisher_fields_declarations
             }
 
-            #setters
-        }
+            impl #struct_name {
+                #[allow(clippy::too_many_arguments)]
+                pub fn new(#(#fields),*) -> Self {
+                    Self {
+                        #(#field_names),*,
+                        #publisher_fields_initializations
+                    }
+                }
 
-        #publish_channel_declarations
+                #setters
+            }
 
-        #subscriber_declarations
+            #publish_channel_declarations
+
+            #subscriber_declarations
+        },
+        published_fields: published_fields_info,
     })
 }
 
@@ -110,7 +131,7 @@ impl StructFields {
     /// All the published fields.
     fn published(&self) -> impl Iterator<Item = &PublishedField> {
         self.fields.iter().filter_map(|field| match field {
-            StructField::Published(published) => Some(published),
+            StructField::Published(published) => Some(published.as_ref()),
             _ => None,
         })
     }
@@ -120,9 +141,9 @@ impl StructFields {
 #[derive(Debug)]
 enum StructField {
     /// Private field.
-    Private(Field),
+    Private(Box<Field>),
     /// Published field.
-    Published(PublishedField),
+    Published(Box<PublishedField>),
 }
 
 impl StructField {
@@ -130,15 +151,16 @@ impl StructField {
     fn parse(field: &mut Field, struct_name: &Ident) -> Result<StructField> {
         PublishedField::parse(field, struct_name).map(|published| {
             published
-                .map(StructField::Published)
-                .unwrap_or_else(|| StructField::Private(field.clone()))
+                .map(|p| StructField::Published(Box::new(p)))
+                .unwrap_or_else(|| StructField::Private(Box::new(field.clone())))
         })
     }
 
     /// Get the field.
     fn field(&self) -> &Field {
         match self {
-            Self::Private(field) | Self::Published(PublishedField { field, .. }) => field,
+            Self::Private(field) => field.as_ref(),
+            Self::Published(published) => &published.field,
         }
     }
 }
@@ -158,6 +180,8 @@ struct PublishedField {
     publish_channel_declaration: proc_macro2::TokenStream,
     /// Subscriber struct declaration.
     subscriber_declaration: proc_macro2::TokenStream,
+    /// Information to be passed to impl processing.
+    info: PublishedFieldInfo,
 }
 
 impl PublishedField {
@@ -291,6 +315,11 @@ impl PublishedField {
             }
         };
 
+        let info = PublishedFieldInfo {
+            field_name: field_name.clone(),
+            subscriber_struct_name: subscriber_struct_name.clone(),
+        };
+
         Ok(Some(PublishedField {
             field: field.clone(),
             publisher_field_declaration,
@@ -298,6 +327,7 @@ impl PublishedField {
             setter,
             publish_channel_declaration,
             subscriber_declaration,
+            info,
         }))
     }
 }

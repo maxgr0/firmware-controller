@@ -7,17 +7,21 @@ use syn::{
     Attribute, Ident, ImplItem, ImplItemFn, ItemImpl, Result, Signature, Token, Visibility,
 };
 
-use crate::util::snake_to_pascal_case;
+use crate::{controller::item_struct::PublishedFieldInfo, util::snake_to_pascal_case};
 
-pub(crate) fn expand(mut input: ItemImpl) -> Result<TokenStream> {
+pub(crate) fn expand(
+    mut input: ItemImpl,
+    published_fields: &[PublishedFieldInfo],
+) -> Result<TokenStream> {
     let struct_name = get_struct_name(&input)?;
     let struct_name_str = struct_name.to_string();
     let methods = get_methods(&mut input, &struct_name)?;
 
-    let signal_declarations = methods.iter().filter_map(|m| match m {
-        Method::Signal(signal) => Some(&signal.declarations),
+    let signals = methods.iter().filter_map(|m| match m {
+        Method::Signal(signal) => Some(signal),
         _ => None,
     });
+    let signal_declarations = signals.clone().map(|s| &s.declarations);
 
     let methods = methods.iter().filter_map(|m| match m {
         Method::Proxied(method) => Some(method),
@@ -39,6 +43,31 @@ pub(crate) fn expand(mut input: ItemImpl) -> Result<TokenStream> {
         }
     };
     input.items.push(syn::parse2(run_method)?);
+
+    // Generate stream getter methods for published fields.
+    let published_field_getters = published_fields.iter().map(|field| {
+        let method_name = Ident::new(
+            &format!("receive_{}_changed", field.field_name),
+            field.field_name.span(),
+        );
+        let subscriber_type = &field.subscriber_struct_name;
+        quote! {
+            pub fn #method_name(&self) -> Option<#subscriber_type> {
+                #subscriber_type::new()
+            }
+        }
+    });
+
+    // Generate stream getter methods for signals.
+    let signal_getters = signals.clone().map(|signal| {
+        let method_name = &signal.receive_method_name;
+        let subscriber_type = &signal.subscriber_struct_name;
+        quote! {
+            pub fn #method_name(&self) -> Option<#subscriber_type> {
+                #subscriber_type::new()
+            }
+        }
+    });
 
     let client_name = Ident::new(&format!("{}Client", struct_name_str), input.span());
     let client_methods = methods.clone().map(|m| &m.client_method);
@@ -65,6 +94,10 @@ pub(crate) fn expand(mut input: ItemImpl) -> Result<TokenStream> {
             }
 
             #(#client_methods)*
+
+            #(#published_field_getters)*
+
+            #(#signal_getters)*
         }
 
         #(#signal_declarations)*
@@ -329,6 +362,10 @@ impl ProxiedMethodArgs<'_> {
 struct Signal {
     /// The input arguments' channel and client-side struct declarations.
     declarations: TokenStream,
+    /// Name of the receive method (e.g., receive_power_error).
+    receive_method_name: Ident,
+    /// Name of the subscriber struct (e.g., ControllerPowerError).
+    subscriber_struct_name: Ident,
 }
 
 impl Signal {
@@ -429,7 +466,14 @@ impl Signal {
             ).await;
         });
 
-        Ok(Self { declarations })
+        let receive_method_name =
+            Ident::new(&format!("receive_{}", method_name_str), method.span());
+
+        Ok(Self {
+            declarations,
+            receive_method_name,
+            subscriber_struct_name,
+        })
     }
 }
 

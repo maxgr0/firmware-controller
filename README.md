@@ -109,9 +109,8 @@ async fn client() {
     use embassy_time::{Timer, Duration};
 
     let mut client = ControllerClient::new();
-    // SAFETY: We don't create more than 16 instances so we won't panic.
-    let state_changed = ControllerState::new().unwrap().map(Either::Left);
-    let error_stream = ControllerPowerError::new().unwrap().map(Either::Right);
+    let state_changed = client.receive_state_changed().unwrap().map(Either::Left);
+    let error_stream = client.receive_power_error().unwrap().map(Either::Right);
     let mut stream = select(state_changed, error_stream);
 
     client.enable_power().await.unwrap();
@@ -148,32 +147,34 @@ async fn client() {
 
 The `controller` macro will generated the following for you:
 
+## Controller struct
+
 * A `new` method that takes the fields of the struct as arguments and returns the struct.
 * For each `published` field:
-  * Setter for this field, named `set_<field-name>` (so`set_state` here), which broadcasts any
+  * Setter for this field, named `set_<field-name>` (e.g., `set_state`), which broadcasts any
     changes made to this field.
-  * Two client-side types:
-    * struct named `<struct-name><field-name-in-pascal-case>Changed` (so `ControllerStateChanged`
-      for `state` field), containing two public fields, named `previous` and `new` fields
-      representing the previous and new values of the field, respectively.
-    * Type named `<struct-name><field-name-in-pascal-case>` (so `ControllerState` for
-      `state` field), which implements `futures::Stream`, yielding each state change as the change
-      struct described above.
-* `run` method with signature `pub async fn run(&mut self);` which runs the controller logic,
-  proxying calls from the client to the implementations here and their return value back to
-  the clients (internally via channels). Typically you'd call it at the end of your `main`
-  or run it as a task.
-* Client-side API for this struct, named `<struct-name>Client` (`ControllerClient` here)
-  which provides exactly the same methods (except signal methods) defined in this implementation
-  that other parts of the code use to call these methods.
+* A `run` method with signature `pub async fn run(&mut self);` which runs the controller logic,
+  proxying calls from the client to the implementations and their return values back to the
+  clients (internally via channels). Typically you'd call it at the end of your `main` or run it
+  as a task.
 * For each `signal` method:
-  * The method body, that broadcasts the signal to all the clients that are listening to it.
-  * Two client-side types:
-    * struct, named `<struct-name><method-name-in-pascal-case>Args` (`ControllerPowerErrorArgs`
-      here), containing all the arguments of this method, as public fields.
-    * Type named `<struct-name><method-name-in-pascal-case>` (`ControllerPowerError` here) which
-      implements `futures::Stream`, yielding each signal broadcasted as the args struct described
-      above.
+  * The method body, that broadcasts the signal to all clients that are listening to it.
+
+## Client API
+
+A client struct named `<struct-name>Client` (`ControllerClient` in the example) with the following
+methods:
+
+* All methods defined in the controller impl (except signal methods), which proxy calls to the
+  controller and return the results.
+* For each `published` field:
+  * `receive_<field-name>_changed()` method (e.g., `receive_state_changed()`) that returns a
+    stream of state changes. The stream yields `<struct-name><field-name-in-pascal-case>Changed`
+    structs (e.g., `ControllerStateChanged`) containing `previous` and `new` fields.
+* For each `signal` method:
+  * `receive_<method-name>()` method (e.g., `receive_power_error()`) that returns a stream of
+    signal events. The stream yields `<struct-name><method-name-in-pascal-case>Args` structs
+    (e.g., `ControllerPowerErrorArgs`) containing all signal arguments as public fields.
 
 ## Dependencies assumed
 
