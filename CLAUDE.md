@@ -11,7 +11,7 @@ This is a procedural macro crate that provides the `#[controller]` attribute mac
 * Signal mechanism for broadcasting events.
 * Pub/sub system for state change notifications.
 
-The macro works by processing both struct definitions (to add publishers) and impl blocks (to generate the controller's `run` method, client API, and signal infrastructure).
+The macro is applied to a module containing both the controller struct definition and its impl block, allowing coordinated code generation of the controller infrastructure, client API, and communication channels.
 
 ## Build & Test Commands
 
@@ -41,10 +41,24 @@ cargo doc --locked
 ## Architecture
 
 ### Macro Entry Point (`src/lib.rs`)
-The `controller` attribute macro dispatches to either `item_struct` or `item_impl` based on input type.
+The `controller` attribute macro parses the input as an `ItemMod` (module) and calls `controller::expand_module()`.
+
+### Module Processing (`src/controller/mod.rs`)
+The `expand_module()` function:
+* Validates the module has a body with exactly one struct and one impl block.
+* Extracts the struct and impl items from the module.
+* Validates that the impl block matches the struct name.
+* Calls `item_struct::expand()` and `item_impl::expand()` to process each component.
+* Combines the generated code back into the module structure along with any other items.
+
+Channel capacities and subscriber limits are also defined here:
+* `ALL_CHANNEL_CAPACITY`: 8
+* `SIGNAL_CHANNEL_CAPACITY`: 8
+* `BROADCAST_MAX_PUBLISHERS`: 1
+* `BROADCAST_MAX_SUBSCRIBERS`: 16
 
 ### Struct Processing (`src/controller/item_struct.rs`)
-Processes `#[controller]` on struct definitions. For fields marked with `#[controller(publish)]`:
+Processes the controller struct definition. For fields marked with `#[controller(publish)]`:
 * Adds publisher fields to the struct.
 * Generates setters (`set_<field>`) that broadcast changes.
 * Creates `<StructName><FieldName>` stream type and `<StructName><FieldName>Changed` event struct.
@@ -52,7 +66,7 @@ Processes `#[controller]` on struct definitions. For fields marked with `#[contr
 The generated `new()` method initializes both user fields and generated publisher fields.
 
 ### Impl Processing (`src/controller/item_impl.rs`)
-Processes `#[controller]` on impl blocks. Distinguishes between:
+Processes the controller impl block. Distinguishes between:
 
 **Proxied methods** (normal methods):
 * Creates request/response channels for each method.
@@ -66,13 +80,6 @@ Processes `#[controller]` on impl blocks. Distinguishes between:
 * Signal methods are NOT exposed in the client API (controller emits them directly).
 
 The generated `run()` method contains a `select_biased!` loop that receives method calls from clients and dispatches them to the user's implementations.
-
-### Constants (`src/controller/mod.rs`)
-Channel capacities and subscriber limits are defined here:
-* `ALL_CHANNEL_CAPACITY`: 8
-* `SIGNAL_CHANNEL_CAPACITY`: 8
-* `BROADCAST_MAX_PUBLISHERS`: 1
-* `BROADCAST_MAX_SUBSCRIBERS`: 16
 
 ### Utilities (`src/util.rs`)
 Case conversion functions (`pascal_to_snake_case`, `snake_to_pascal_case`) used for generating type and method names.

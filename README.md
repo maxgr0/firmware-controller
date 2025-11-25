@@ -39,52 +39,57 @@ pub enum State {
     Disabled,
 }
 
-// The controller struct. This is where you define the state of your firmware.
 #[controller]
-pub struct Controller {
-    #[controller(publish)]
-    state: State,
-    // Other fields. Note: No all of them need to be published.
-}
+mod controller {
+    use super::*;
 
-// The controller implementation. This is where you define the logic of your firmware.
-#[controller]
-impl Controller {
-    // The `signal` attribute marks this method signature (note: no implementation body) as a
-    // signal, that you can use to notify other parts of your code about specific events.
-    #[controller(signal)]
-    pub async fn power_error(&self, description: heapless::String<64>);
+    // The controller struct. This is where you define the state of your firmware.
+    pub struct Controller {
+        #[controller(publish)]
+        state: State,
+        // Other fields. Note: No all of them need to be published.
+    }
 
-    pub async fn enable_power(&mut self) -> Result<(), MyFirmwareError> {
-        if self.state != State::Disabled {
-            return Err(MyFirmwareError::InvalidState);
+    // The controller implementation. This is where you define the logic of your firmware.
+    impl Controller {
+        // The `signal` attribute marks this method signature (note: no implementation body) as a
+        // signal, that you can use to notify other parts of your code about specific events.
+        #[controller(signal)]
+        pub async fn power_error(&self, description: heapless::String<64>);
+
+        pub async fn enable_power(&mut self) -> Result<(), MyFirmwareError> {
+            if self.state != State::Disabled {
+                return Err(MyFirmwareError::InvalidState);
+            }
+
+            // Any other logic you want to run when enabling power.
+
+            self.set_state(State::Enabled).await;
+            self.power_error("Dummy error just for the showcase".try_into().unwrap())
+                .await;
+
+            Ok(())
         }
 
-        // Any other logic you want to run when enabling power.
+        pub async fn disable_power(&mut self) -> Result<(), MyFirmwareError> {
+            if self.state != State::Enabled {
+                return Err(MyFirmwareError::InvalidState);
+            }
 
-        self.set_state(State::Enabled).await;
-        self.power_error("Dummy error just for the showcase".try_into().unwrap())
-            .await;
+            // Any other logic you want to run when enabling power.
 
-        Ok(())
-    }
+            self.set_state(State::Disabled).await;
 
-    pub async fn disable_power(&mut self) -> Result<(), MyFirmwareError> {
-        if self.state != State::Enabled {
-            return Err(MyFirmwareError::InvalidState);
+            Ok(())
         }
 
-        // Any other logic you want to run when enabling power.
-
-        self.set_state(State::Disabled).await;
-
-        Ok(())
-    }
-
-    // Method that doesn't return anything.
-    pub async fn return_nothing(&self) {
+        // Method that doesn't return anything.
+        pub async fn return_nothing(&self) {
+        }
     }
 }
+
+use controller::*;
 
 #[embassy_executor::main]
 async fn main(spawner: embassy_executor::Spawner) {
