@@ -22,7 +22,10 @@ syn = { version = "2", features = ["extra-traits", "fold", "full"] }
 heapless = { version = "0.7", default-features = false }
 futures = { version = "0.3", default-features = false, features = [
     "async-await",
+    "std",
+    "executor",
 ] }
+critical-section = { version = "1.2", features = ["std"] }
 embassy-sync = "0.7.2"
 embassy-executor = { version = "0.9.1", features = [
     "arch-std",
