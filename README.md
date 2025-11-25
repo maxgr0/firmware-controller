@@ -47,7 +47,7 @@ mod controller {
     pub struct Controller {
         #[controller(publish)]
         state: State,
-        // Other fields. Note: No all of them need to be published.
+        // Other fields. Note: Not all of them need to be published.
     }
 
     // The controller implementation. This is where you define the logic of your firmware.
@@ -145,7 +145,7 @@ async fn client() {
 
 # Details
 
-The `controller` macro will generated the following for you:
+The `controller` macro will generate the following for you:
 
 ## Controller struct
 
