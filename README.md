@@ -153,7 +153,7 @@ The `controller` macro will generate the following for you:
 * For each `published` field:
   * Setter for this field, named `set_<field-name>` (e.g., `set_state`), which broadcasts any
     changes made to this field.
-* A `run` method with signature `pub async fn run(&mut self);` which runs the controller logic,
+* A `run` method with signature `pub async fn run(mut self);` which runs the controller logic,
   proxying calls from the client to the implementations and their return values back to the
   clients (internally via channels). Typically you'd call it at the end of your `main` or run it
   as a task.
