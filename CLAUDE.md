@@ -8,8 +8,8 @@ This is a procedural macro crate that provides the `#[controller]` attribute mac
 
 * A controller struct that manages peripheral state.
 * Client API for sending commands to the controller.
-* Signal mechanism for broadcasting events.
-* Pub/sub system for state change notifications.
+* Signal mechanism for broadcasting events (PubSubChannel).
+* Watch-based subscriptions for state change notifications (yields current value first).
 
 The macro is applied to a module containing both the controller struct definition and its impl block, allowing coordinated code generation of the controller infrastructure, client API, and communication channels.
 
@@ -52,18 +52,31 @@ The `expand_module()` function:
 * Combines the generated code back into the module structure along with any other items.
 
 Channel capacities and subscriber limits are also defined here:
-* `ALL_CHANNEL_CAPACITY`: 8
-* `SIGNAL_CHANNEL_CAPACITY`: 8
-* `BROADCAST_MAX_PUBLISHERS`: 1
-* `BROADCAST_MAX_SUBSCRIBERS`: 16
+* `ALL_CHANNEL_CAPACITY`: 8 (method/getter/setter request channels)
+* `SIGNAL_CHANNEL_CAPACITY`: 8 (signal PubSubChannel queue size)
+* `BROADCAST_MAX_PUBLISHERS`: 1 (signals only)
+* `BROADCAST_MAX_SUBSCRIBERS`: 16 (Watch for published fields, PubSubChannel for signals)
 
 ### Struct Processing (`src/controller/item_struct.rs`)
-Processes the controller struct definition. For fields marked with `#[controller(publish)]`:
-* Adds publisher fields to the struct.
-* Generates setters (`set_<field>`) that broadcast changes.
-* Creates `<StructName><FieldName>` stream type and `<StructName><FieldName>Changed` event struct.
+Processes the controller struct definition. Supports three field attributes:
 
-The generated `new()` method initializes both user fields and generated publisher fields.
+**`#[controller(publish)]`** - Enables state change subscriptions:
+* Uses `embassy_sync::watch::Watch` channel (stores latest value).
+* Generates internal setter (`set_<field>`) that broadcasts changes.
+* Creates `<StructName><FieldName>` subscriber stream type.
+* Stream yields current value on first poll, then subsequent changes.
+
+**`#[controller(getter)]` or `#[controller(getter = "name")]`**:
+* Generates a client-side getter method to read the field value.
+* Default name is the field name; custom name can be specified.
+
+**`#[controller(setter)]` or `#[controller(setter = "name")]`**:
+* Generates a client-side setter method to update the field value.
+* Default name is `set_<field>`; custom name can be specified.
+* Can be combined with `publish` to also broadcast changes.
+
+The generated `new()` method initializes both user fields and generated sender fields, and sends
+initial values to Watch channels so subscribers get them immediately.
 
 ### Impl Processing (`src/controller/item_impl.rs`)
 Processes the controller impl block. Distinguishes between:
@@ -75,11 +88,18 @@ Processes the controller impl block. Distinguishes between:
 
 **Signal methods** (marked with `#[controller(signal)]`):
 * Methods have no body in the user's impl block.
+* Uses `embassy_sync::pubsub::PubSubChannel` for broadcast.
 * Generates method implementation that broadcasts to subscribers.
 * Creates `<StructName><MethodName>` stream type and `<StructName><MethodName>Args` struct.
 * Signal methods are NOT exposed in the client API (controller emits them directly).
 
-The generated `run()` method contains a `select_biased!` loop that receives method calls from clients and dispatches them to the user's implementations.
+**Getter/setter methods** (from struct field attributes):
+* Receives getter/setter field info from struct processing.
+* Generates client-side getter methods that request current field value.
+* Generates client-side setter methods that update field value (and broadcast if published).
+
+The generated `run()` method contains a `select_biased!` loop that receives method calls from
+clients and dispatches them to the user's implementations.
 
 ### Utilities (`src/util.rs`)
 Case conversion functions (`pascal_to_snake_case`, `snake_to_pascal_case`) used for generating type and method names.
@@ -97,5 +117,7 @@ Dev dependencies include `embassy-executor` and `embassy-time` for testing.
 * Singleton operation: multiple controller instances interfere with each other.
 * Methods must be async and cannot use reference parameters/return types.
 * Maximum 16 subscribers per state/signal stream.
-* Published fields must implement `Clone` and `Debug`.
-* Streams must be continuously polled or notifications are missed.
+* Published fields must implement `Clone`.
+* Published field streams yield current value on first poll; intermediate values may be missed if
+  not polled between changes.
+* Signal streams must be continuously polled or notifications are missed.
