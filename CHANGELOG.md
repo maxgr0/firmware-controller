@@ -1,3 +1,7 @@
+# 0.4.1 (Nov 26th, 2025)
+
+* Allow specifying visibility on struct fields.
+
 # 0.4.0 (Nov 26th, 2025)
 
 ## Breaking Changes
