@@ -74,7 +74,11 @@ pub(crate) fn expand_module(input: ItemMod) -> Result<TokenStream> {
     }
 
     let expanded_struct = item_struct::expand(struct_item)?;
-    let expanded_impl = item_impl::expand(impl_item, &expanded_struct.published_fields)?;
+    let expanded_impl = item_impl::expand(
+        impl_item,
+        &expanded_struct.published_fields,
+        &expanded_struct.getter_fields,
+    )?;
     let struct_tokens = expanded_struct.tokens;
 
     Ok(quote! {

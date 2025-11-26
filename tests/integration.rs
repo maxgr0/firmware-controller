@@ -25,9 +25,9 @@ mod test_controller {
     use super::*;
 
     pub struct Controller {
-        #[controller(publish)]
+        #[controller(publish, getter = "get_current_state")]
         state: State,
-        #[controller(publish(pub_setter))]
+        #[controller(publish(pub_setter), getter)]
         mode: Mode,
         counter: u32,
     }
@@ -194,6 +194,14 @@ fn test_controller_basic_functionality() {
 
         // Test 9: Call method with no return value.
         client.return_nothing().await;
+
+        // Test 10: Use getter with custom name to get state.
+        let state = client.get_current_state().await;
+        assert_eq!(state, State::Error, "State should be Error");
+
+        // Test 11: Use getter with default field name to get mode.
+        let mode = client.mode().await;
+        assert_eq!(mode, Mode::Debug, "Mode should be Debug");
 
         // If we get here, all tests passed.
     });
