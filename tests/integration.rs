@@ -94,6 +94,13 @@ fn test_controller_basic_functionality() {
         // Test 1: Subscribe to state changes.
         let mut state_stream = client.receive_state_changed().expect("Failed to subscribe");
 
+        // Test 1a: First poll returns the initial (current) value.
+        let initial_state = state_stream
+            .next()
+            .await
+            .expect("Should receive initial state");
+        assert_eq!(initial_state, State::Idle, "Initial state should be Idle");
+
         // Test 2: Subscribe to signals.
         let mut error_stream = client
             .receive_error_occurred()
@@ -120,21 +127,12 @@ fn test_controller_basic_functionality() {
             "Activate should succeed from Idle state"
         );
 
-        // Verify we received the state change.
-        let state_change = state_stream
+        // Verify we received the state change (raw value, not Changed struct).
+        let new_state = state_stream
             .next()
             .await
             .expect("Should receive state change");
-        assert_eq!(
-            state_change.previous,
-            State::Idle,
-            "Previous state should be Idle"
-        );
-        assert_eq!(
-            state_change.new,
-            State::Active,
-            "New state should be Active"
-        );
+        assert_eq!(new_state, State::Active, "New state should be Active");
 
         // Verify we received the operation_complete signal.
         let _complete = complete_stream
@@ -155,16 +153,11 @@ fn test_controller_basic_functionality() {
         );
 
         // Verify state changed to Error.
-        let state_change = state_stream
+        let new_state = state_stream
             .next()
             .await
             .expect("Should receive state change");
-        assert_eq!(
-            state_change.previous,
-            State::Active,
-            "Previous state should be Active"
-        );
-        assert_eq!(state_change.new, State::Error, "New state should be Error");
+        assert_eq!(new_state, State::Error, "New state should be Error");
 
         // Verify we received the error signal.
         let error_signal = error_stream

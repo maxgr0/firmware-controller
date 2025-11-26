@@ -45,28 +45,28 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
 
     // Collect published field info.
     let (
-        publish_channel_declarations,
-        publisher_fields_declarations,
-        publisher_fields_initializations,
+        watch_channel_declarations,
+        sender_fields_declarations,
+        sender_fields_initializations,
         setters,
         subscriber_declarations,
         published_fields_info,
     ) = struct_fields.published().fold(
         (quote!(), quote!(), quote!(), quote!(), quote!(), Vec::new()),
         |(
-            publish_channels,
-            publisher_fields_declarations,
-            publisher_fields_initializations,
+            watch_channels,
+            sender_fields_declarations,
+            sender_fields_initializations,
             setters,
             subscribers,
             mut infos,
         ),
          f| {
             let published = f.published.as_ref().unwrap();
-            let (publish_channel, publisher_field, publisher_field_init, setter, subscriber) = (
-                &published.publish_channel_declaration,
-                &published.publisher_field_declaration,
-                &published.publisher_field_initialization,
+            let (watch_channel, sender_field, sender_field_init, setter, subscriber) = (
+                &published.watch_channel_declaration,
+                &published.sender_field_declaration,
+                &published.sender_field_initialization,
                 &published.setter,
                 &published.subscriber_declaration,
             );
@@ -74,9 +74,9 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
             infos.push(published.info.clone());
 
             (
-                quote! { #publish_channels #publish_channel },
-                quote! { #publisher_fields_declarations #publisher_field, },
-                quote! { #publisher_fields_initializations #publisher_field_init, },
+                quote! { #watch_channels #watch_channel },
+                quote! { #sender_fields_declarations #sender_field, },
+                quote! { #sender_fields_initializations #sender_field_init, },
                 quote! { #setters #setter },
                 quote! { #subscribers #subscriber },
                 infos,
@@ -131,26 +131,38 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
     let fields = struct_fields.raw_fields().collect::<Vec<_>>();
     let vis = &input.vis;
 
+    // Generate initial value sends for Watch channels.
+    let initial_value_sends = published_fields_info.iter().map(|info| {
+        let field_name = &info.field_name;
+        let sender_name = Ident::new(&format!("{}_sender", field_name), field_name.span());
+        quote! {
+            __self.#sender_name.send(core::clone::Clone::clone(&__self.#field_name));
+        }
+    });
+
     Ok(ExpandedStruct {
         tokens: quote! {
             #vis struct #struct_name {
                 #(#fields),*,
-                #publisher_fields_declarations
+                #sender_fields_declarations
             }
 
             impl #struct_name {
                 #[allow(clippy::too_many_arguments)]
                 pub fn new(#(#fields),*) -> Self {
-                    Self {
+                    let __self = Self {
                         #(#field_names),*,
-                        #publisher_fields_initializations
-                    }
+                        #sender_fields_initializations
+                    };
+                    // Send initial values so subscribers can get them immediately.
+                    #(#initial_value_sends)*
+                    __self
                 }
 
                 #setters
             }
 
-            #publish_channel_declarations
+            #watch_channel_declarations
 
             #subscriber_declarations
         },
@@ -260,14 +272,14 @@ impl StructField {
 /// Generated code for a published field.
 #[derive(Debug)]
 struct PublishedFieldCode {
-    /// Publisher field declaration.
-    publisher_field_declaration: proc_macro2::TokenStream,
-    /// Publisher field initialization.
-    publisher_field_initialization: proc_macro2::TokenStream,
+    /// Watch sender field declaration.
+    sender_field_declaration: proc_macro2::TokenStream,
+    /// Watch sender field initialization.
+    sender_field_initialization: proc_macro2::TokenStream,
     /// Field setter.
     setter: proc_macro2::TokenStream,
-    /// Publish channel declaration.
-    publish_channel_declaration: proc_macro2::TokenStream,
+    /// Watch channel declaration.
+    watch_channel_declaration: proc_macro2::TokenStream,
     /// Subscriber struct declaration.
     subscriber_declaration: proc_macro2::TokenStream,
     /// Information to be passed to impl processing.
@@ -347,7 +359,7 @@ fn parse_controller_attrs(field: &mut Field) -> Result<ControllerAttrs> {
     Ok(attrs)
 }
 
-/// Generate code for a published field.
+/// Generate code for a published field using Watch channel.
 fn generate_publish_code(field: &Field, struct_name: &Ident) -> Result<PublishedFieldCode> {
     let struct_name_str = struct_name.to_string();
     let field_name = field.ident.as_ref().unwrap();
@@ -356,8 +368,8 @@ fn generate_publish_code(field: &Field, struct_name: &Ident) -> Result<Published
 
     let struct_name_caps = pascal_to_snake_case(&struct_name_str).to_ascii_uppercase();
     let field_name_caps = field_name_str.to_ascii_uppercase();
-    let publish_channel_name = Ident::new(
-        &format!("{struct_name_caps}_{field_name_caps}_CHANNEL"),
+    let watch_channel_name = Ident::new(
+        &format!("{struct_name_caps}_{field_name_caps}_WATCH"),
         field.span(),
     );
 
@@ -366,93 +378,87 @@ fn generate_publish_code(field: &Field, struct_name: &Ident) -> Result<Published
         &format!("{struct_name_str}{field_name_pascal}"),
         field.span(),
     );
-    let change_struct_name = Ident::new(
-        &format!("{struct_name_str}{field_name_pascal}Changed"),
-        field.span(),
-    );
-    let capacity = super::ALL_CHANNEL_CAPACITY;
     let max_subscribers = super::BROADCAST_MAX_SUBSCRIBERS;
-    let max_publishers = super::BROADCAST_MAX_PUBLISHERS;
 
     let setter_name = Ident::new(&format!("set_{field_name_str}"), field.span());
-    let publisher_name = Ident::new(&format!("{field_name_str}_publisher"), field.span());
-    let publisher_field_declaration = quote! {
-        #publisher_name:
-            embassy_sync::pubsub::Publisher<
+    let sender_name = Ident::new(&format!("{field_name_str}_sender"), field.span());
+
+    let sender_field_declaration = quote! {
+        #sender_name:
+            embassy_sync::watch::Sender<
                 'static,
                 embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                #change_struct_name,
-                #capacity,
+                #ty,
                 #max_subscribers,
-                #max_publishers,
             >
     };
-    let publisher_field_initialization = quote! {
-        // We only create one publisher so we can't fail.
-        #publisher_name: embassy_sync::pubsub::PubSubChannel::publisher(&#publish_channel_name).unwrap()
-    };
-    let setter = quote! {
-        pub async fn #setter_name(&mut self, mut value: #ty) {
-            core::mem::swap(&mut self.#field_name, &mut value);
 
-            let change = #change_struct_name {
-                previous: value,
-                new: core::clone::Clone::clone(&self.#field_name),
-            };
-            embassy_sync::pubsub::publisher::Pub::publish_immediate(
-                &self.#publisher_name,
-                change,
-            );
+    let sender_field_initialization = quote! {
+        #sender_name: embassy_sync::watch::Watch::sender(&#watch_channel_name)
+    };
+
+    // Watch send() is sync, but we keep the setter async for API compatibility.
+    let setter = quote! {
+        pub async fn #setter_name(&mut self, value: #ty) {
+            self.#field_name = value;
+            self.#sender_name.send(core::clone::Clone::clone(&self.#field_name));
         }
     };
 
-    let publish_channel_declaration = quote! {
-        static #publish_channel_name:
-            embassy_sync::pubsub::PubSubChannel<
+    let watch_channel_declaration = quote! {
+        static #watch_channel_name:
+            embassy_sync::watch::Watch<
                 embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                #change_struct_name,
-                #capacity,
+                #ty,
                 #max_subscribers,
-                #max_publishers,
-            > = embassy_sync::pubsub::PubSubChannel::new();
+            > = embassy_sync::watch::Watch::new();
     };
 
     let subscriber_declaration = quote! {
         pub struct #subscriber_struct_name {
-            subscriber: embassy_sync::pubsub::Subscriber<
+            receiver: embassy_sync::watch::Receiver<
                 'static,
                 embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                #change_struct_name,
-                #capacity,
+                #ty,
                 #max_subscribers,
-                #max_publishers,
             >,
+            first_poll: bool,
         }
 
         impl #subscriber_struct_name {
             pub fn new() -> Option<Self> {
-                embassy_sync::pubsub::PubSubChannel::subscriber(&#publish_channel_name)
-                    .ok()
-                    .map(|subscriber| Self { subscriber })
+                embassy_sync::watch::Watch::receiver(&#watch_channel_name)
+                    .map(|receiver| Self {
+                        receiver,
+                        first_poll: true,
+                    })
             }
         }
 
         impl futures::Stream for #subscriber_struct_name {
-            type Item = #change_struct_name;
+            type Item = #ty;
 
             fn poll_next(
-                self: core::pin::Pin<&mut Self>,
+                mut self: core::pin::Pin<&mut Self>,
                 cx: &mut core::task::Context<'_>,
             ) -> core::task::Poll<Option<Self::Item>> {
-                let subscriber = core::pin::Pin::new(&mut *self.get_mut().subscriber);
-                futures::Stream::poll_next(subscriber, cx)
-            }
-        }
+                use core::future::Future;
 
-        #[derive(Debug, Clone)]
-        pub struct #change_struct_name {
-            pub previous: #ty,
-            pub new: #ty,
+                let this = self.as_mut().get_mut();
+
+                // First poll: return current value immediately if available.
+                if this.first_poll {
+                    this.first_poll = false;
+                    if let Some(value) = this.receiver.try_get() {
+                        return core::task::Poll::Ready(Some(value));
+                    }
+                }
+
+                // Create changed() future and poll it in place.
+                let fut = this.receiver.changed();
+                futures::pin_mut!(fut);
+                fut.poll(cx).map(Some)
+            }
         }
     };
 
@@ -462,10 +468,10 @@ fn generate_publish_code(field: &Field, struct_name: &Ident) -> Result<Published
     };
 
     Ok(PublishedFieldCode {
-        publisher_field_declaration,
-        publisher_field_initialization,
+        sender_field_declaration,
+        sender_field_initialization,
         setter,
-        publish_channel_declaration,
+        watch_channel_declaration,
         subscriber_declaration,
         info,
     })
