@@ -219,3 +219,57 @@ fn test_controller_basic_functionality() {
 async fn controller_task(controller: Controller) {
     controller.run().await;
 }
+
+/// Test that visibility specifiers on struct fields are preserved.
+#[controller]
+mod visibility_test_controller {
+    pub struct Controller {
+        #[controller(getter)]
+        pub public_field: u32,
+        #[controller(getter)]
+        pub(crate) crate_field: i32,
+        #[controller(getter)]
+        private_field: bool,
+    }
+
+    impl Controller {}
+}
+
+#[test]
+fn test_visibility_on_fields() {
+    // Verify struct compiles and fields have correct visibility.
+    let controller = visibility_test_controller::Controller::new(42, -1, true);
+
+    // Public field should be accessible.
+    assert_eq!(controller.public_field, 42);
+
+    // pub(crate) field should be accessible within this crate.
+    assert_eq!(controller.crate_field, -1);
+
+    // Note: private_field is not accessible here, which is correct.
+    // We can only access it through the method.
+
+    // Run the controller in a background thread.
+    std::thread::spawn(move || {
+        let executor = Box::leak(Box::new(embassy_executor::Executor::new()));
+        executor.run(move |spawner| {
+            spawner
+                .spawn(visibility_controller_task(controller))
+                .unwrap();
+        });
+    });
+
+    futures::executor::block_on(async {
+        let client = visibility_test_controller::ControllerClient::new();
+
+        // Use generated getters from #[controller(getter)] attribute.
+        assert_eq!(client.public_field().await, 42);
+        assert_eq!(client.crate_field().await, -1);
+        assert_eq!(client.private_field().await, true);
+    });
+}
+
+#[embassy_executor::task]
+async fn visibility_controller_task(controller: visibility_test_controller::Controller) {
+    controller.run().await;
+}

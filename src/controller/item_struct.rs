@@ -129,6 +129,12 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
         .collect();
 
     let fields = struct_fields.raw_fields().collect::<Vec<_>>();
+    // Generate function parameters without visibility (visibility is only valid on struct fields).
+    let new_fn_params = fields.iter().map(|f| {
+        let ident = f.ident.as_ref().unwrap();
+        let ty = &f.ty;
+        quote! { #ident: #ty }
+    });
     let vis = &input.vis;
 
     // Generate initial value sends for Watch channels.
@@ -149,7 +155,7 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
 
             impl #struct_name {
                 #[allow(clippy::too_many_arguments)]
-                pub fn new(#(#fields),*) -> Self {
+                pub fn new(#(#new_fn_params),*) -> Self {
                     let __self = Self {
                         #(#field_names),*,
                         #sender_fields_initializations
