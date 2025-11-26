@@ -109,17 +109,21 @@ async fn client() {
     use embassy_time::{Timer, Duration};
 
     let mut client = ControllerClient::new();
-    let state_changed = client.receive_state_changed().unwrap().map(Either::Left);
+    let mut state_stream = client.receive_state_changed().unwrap();
     let error_stream = client.receive_power_error().unwrap().map(Either::Right);
+
+    // First poll returns the current (initial) state.
+    let initial_state = state_stream.next().await.unwrap();
+    assert_eq!(initial_state, State::Disabled);
+
+    // Now combine streams for event handling.
+    let state_changed = state_stream.map(Either::Left);
     let mut stream = select(state_changed, error_stream);
 
     client.enable_power().await.unwrap();
     while let Some(event) = stream.next().await {
         match event {
-            Either::Left(ControllerStateChanged {
-                new: State::Enabled,
-                ..
-            }) => {
+            Either::Left(State::Enabled) => {
                 // This is fine in this very simple example where we've only one client in a single
                 // task. In a real-world application, you should ensure that the stream is polled
                 // continuously. Otherwise, you might miss notifications.
@@ -127,10 +131,7 @@ async fn client() {
 
                 client.disable_power().await.unwrap();
             }
-            Either::Left(ControllerStateChanged {
-                new: State::Disabled,
-                ..
-            }) => {
+            Either::Left(State::Disabled) => {
                 Timer::after(Duration::from_secs(1)).await;
 
                 client.enable_power().await.unwrap();
@@ -169,11 +170,16 @@ methods:
   controller and return the results.
 * For each `published` field:
   * `receive_<field-name>_changed()` method (e.g., `receive_state_changed()`) that returns a
-    stream of state changes. The stream yields `<struct-name><field-name-in-pascal-case>Changed`
-    structs (e.g., `ControllerStateChanged`) containing `previous` and `new` fields.
-  * If the field is marked with `#[controller(publish(pub_setter))]`, a public
-    `set_<field-name>()` method (e.g., `set_state()`) is also generated on the client, allowing
-    external code to update the field value through the client API.
+    stream of state values. The first value yielded is the current state at subscription time,
+    and subsequent values are emitted when the field changes. The stream yields values of the
+    field type directly (e.g., `State`).
+* For each field with a `getter` attribute (e.g., `#[controller(getter)]` or
+  `#[controller(getter = "custom_name")]`), a getter method is generated on the client. The default
+  name is the field name; a custom name can be specified.
+* For each field with a `setter` attribute (e.g., `#[controller(setter)]` or
+  `#[controller(setter = "custom_name")]`), a public setter method is generated on the client,
+  allowing external code to update the field value through the client API. The default setter
+  name is `set_<field-name>()`. This can be combined with `publish` to also broadcast changes.
 * For each `signal` method:
   * `receive_<method-name>()` method (e.g., `receive_power_error()`) that returns a stream of
     signal events. The stream yields `<struct-name><method-name-in-pascal-case>Args` structs
@@ -196,6 +202,8 @@ The `controller` macro assumes that you have the following dependencies in your 
 * Methods must be async.
 * The maximum number of subscribers state change and signal streams is 16. We plan to provide an
   attribute to make this configurable in the future.
-* The type of all published fields must implement `Clone` and `Debug`.
-* The signal and published fields' streams must be continuely polled. Otherwise notifications will
-  be missed.
+* The type of all published fields must implement `Clone`.
+* Published field streams yield the current value on first poll, then subsequent changes. Only the
+  latest value is stored; intermediate values may be missed if the stream is not polled between
+  changes.
+* Signal streams must be continuously polled. Otherwise notifications will be missed.

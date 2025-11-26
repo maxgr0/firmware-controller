@@ -7,11 +7,14 @@ use syn::{
     Attribute, Ident, ImplItem, ImplItemFn, ItemImpl, Result, Signature, Token, Visibility,
 };
 
-use crate::{controller::item_struct::PublishedFieldInfo, util::snake_to_pascal_case};
+use crate::controller::item_struct::{GetterFieldInfo, PublishedFieldInfo, SetterFieldInfo};
+use crate::util::snake_to_pascal_case;
 
 pub(crate) fn expand(
     mut input: ItemImpl,
     published_fields: &[PublishedFieldInfo],
+    getter_fields: &[GetterFieldInfo],
+    setter_fields: &[SetterFieldInfo],
 ) -> Result<TokenStream> {
     let struct_name = get_struct_name(&input)?;
     let struct_name_str = struct_name.to_string();
@@ -31,10 +34,9 @@ pub(crate) fn expand(
     let args_channels_rx_tx = methods.clone().map(|m| &m.args_channels_rx_tx);
     let select_arms = methods.clone().map(|m| &m.select_arm);
 
-    // Generate public setters for published fields with pub_setter.
-    let pub_setters: Vec<_> = published_fields
+    // Generate public setters for fields with setter attribute.
+    let pub_setters: Vec<_> = setter_fields
         .iter()
-        .filter(|field| field.pub_setter)
         .map(|field| generate_pub_setter(field, &struct_name))
         .collect();
     let pub_setter_channel_declarations = pub_setters.iter().map(|s| &s.channel_declarations);
@@ -46,15 +48,31 @@ pub(crate) fn expand(
     let pub_setter_client_tx_rx_initializations =
         pub_setters.iter().map(|s| &s.client_tx_rx_initializations);
 
+    // Generate public getters for fields with getter attribute.
+    let pub_getters: Vec<_> = getter_fields
+        .iter()
+        .map(|field| generate_pub_getter(field, &struct_name))
+        .collect();
+    let pub_getter_channel_declarations = pub_getters.iter().map(|g| &g.channel_declarations);
+    let pub_getter_rx_tx = pub_getters.iter().map(|g| &g.rx_tx);
+    let pub_getter_select_arms = pub_getters.iter().map(|g| &g.select_arm);
+    let pub_getter_client_methods = pub_getters.iter().map(|g| &g.client_method);
+    let pub_getter_client_tx_rx_declarations =
+        pub_getters.iter().map(|g| &g.client_tx_rx_declarations);
+    let pub_getter_client_tx_rx_initializations =
+        pub_getters.iter().map(|g| &g.client_tx_rx_initializations);
+
     let run_method = quote! {
         pub async fn run(mut self) {
             #(#args_channels_rx_tx)*
             #(#pub_setter_rx_tx)*
+            #(#pub_getter_rx_tx)*
 
             loop {
                 futures::select_biased! {
                     #(#select_arms,)*
-                    #(#pub_setter_select_arms),*
+                    #(#pub_setter_select_arms,)*
+                    #(#pub_getter_select_arms,)*
                 }
             }
         }
@@ -97,12 +115,14 @@ pub(crate) fn expand(
     Ok(quote! {
         #(#args_channel_declarations)*
         #(#pub_setter_channel_declarations)*
+        #(#pub_getter_channel_declarations)*
 
         #input
 
         pub struct #client_name {
             #(#client_method_tx_rx_declarations)*
             #(#pub_setter_client_tx_rx_declarations)*
+            #(#pub_getter_client_tx_rx_declarations)*
         }
 
         impl #client_name {
@@ -110,12 +130,15 @@ pub(crate) fn expand(
                 Self {
                     #(#client_method_tx_rx_initializations)*
                     #(#pub_setter_client_tx_rx_initializations)*
+                    #(#pub_getter_client_tx_rx_initializations)*
                 }
             }
 
             #(#client_methods)*
 
             #(#pub_setter_client_methods)*
+
+            #(#pub_getter_client_methods)*
 
             #(#published_field_getters)*
 
@@ -600,7 +623,17 @@ struct PubSetter {
     client_tx_rx_initializations: TokenStream,
 }
 
-fn generate_pub_setter(field: &PublishedFieldInfo, struct_name: &Ident) -> PubSetter {
+#[derive(Debug)]
+struct PubGetter {
+    channel_declarations: TokenStream,
+    rx_tx: TokenStream,
+    select_arm: TokenStream,
+    client_method: TokenStream,
+    client_tx_rx_declarations: TokenStream,
+    client_tx_rx_initializations: TokenStream,
+}
+
+fn generate_pub_setter(field: &SetterFieldInfo, struct_name: &Ident) -> PubSetter {
     let field_name = &field.field_name;
     let field_type = &field.field_type;
     let setter_method_name = &field.setter_name;
@@ -645,13 +678,27 @@ fn generate_pub_setter(field: &PublishedFieldInfo, struct_name: &Ident) -> PubSe
         let #output_channel_tx_name = embassy_sync::channel::Channel::sender(&#output_channel_name);
     };
 
-    let select_arm = quote! {
-        value = futures::FutureExt::fuse(
-            embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
-        ) => {
-            self.#setter_method_name(value).await;
+    let select_arm = if let Some(internal_setter) = &field.internal_setter_name {
+        // Published field: call the internal setter which broadcasts changes.
+        quote! {
+            value = futures::FutureExt::fuse(
+                embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
+            ) => {
+                self.#internal_setter(value).await;
 
-            embassy_sync::channel::Sender::send(&#output_channel_tx_name, ()).await;
+                embassy_sync::channel::Sender::send(&#output_channel_tx_name, ()).await;
+            }
+        }
+    } else {
+        // Non-published field: set the field directly.
+        quote! {
+            value = futures::FutureExt::fuse(
+                embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
+            ) => {
+                self.#field_name = value;
+
+                embassy_sync::channel::Sender::send(&#output_channel_tx_name, ()).await;
+            }
         }
     };
 
@@ -678,15 +725,119 @@ fn generate_pub_setter(field: &PublishedFieldInfo, struct_name: &Ident) -> PubSe
             embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             (),
             #capacity,
-        >
+        >,
     };
 
     let client_tx_rx_initializations = quote! {
         #input_channel_tx_name: embassy_sync::channel::Channel::sender(&#input_channel_name),
-        #output_channel_rx_name: embassy_sync::channel::Channel::receiver(&#output_channel_name)
+        #output_channel_rx_name: embassy_sync::channel::Channel::receiver(&#output_channel_name),
     };
 
     PubSetter {
+        channel_declarations,
+        rx_tx,
+        select_arm,
+        client_method,
+        client_tx_rx_declarations,
+        client_tx_rx_initializations,
+    }
+}
+
+fn generate_pub_getter(field: &GetterFieldInfo, struct_name: &Ident) -> PubGetter {
+    let field_name = &field.field_name;
+    let field_type = &field.field_type;
+    let getter_name = &field.getter_name;
+    let field_name_str = field_name.to_string();
+
+    let struct_name_caps = struct_name.to_string().to_uppercase();
+    let field_name_caps = field_name_str.to_uppercase();
+    let input_channel_name = Ident::new(
+        &format!("{}_GET_{}_INPUT_CHANNEL", struct_name_caps, field_name_caps),
+        field_name.span(),
+    );
+    let output_channel_name = Ident::new(
+        &format!(
+            "{}_GET_{}_OUTPUT_CHANNEL",
+            struct_name_caps, field_name_caps
+        ),
+        field_name.span(),
+    );
+    let capacity = super::ALL_CHANNEL_CAPACITY;
+
+    let channel_declarations = quote! {
+        static #input_channel_name:
+            embassy_sync::channel::Channel<
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                (),
+                #capacity,
+            > = embassy_sync::channel::Channel::new();
+        static #output_channel_name:
+            embassy_sync::channel::Channel<
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                #field_type,
+                #capacity,
+            > = embassy_sync::channel::Channel::new();
+    };
+
+    let input_channel_rx_name = Ident::new(
+        &format!("{}_get_request_rx", field_name_str),
+        field_name.span(),
+    );
+    let output_channel_tx_name = Ident::new(
+        &format!("{}_get_response_tx", field_name_str),
+        field_name.span(),
+    );
+    let rx_tx = quote! {
+        let #input_channel_rx_name = embassy_sync::channel::Channel::receiver(&#input_channel_name);
+        let #output_channel_tx_name = embassy_sync::channel::Channel::sender(&#output_channel_name);
+    };
+
+    let select_arm = quote! {
+        _ = futures::FutureExt::fuse(
+            embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
+        ) => {
+            let value = core::clone::Clone::clone(&self.#field_name);
+
+            embassy_sync::channel::Sender::send(&#output_channel_tx_name, value).await;
+        }
+    };
+
+    let input_channel_tx_name = Ident::new(
+        &format!("{}_get_request_tx", field_name_str),
+        field_name.span(),
+    );
+    let output_channel_rx_name = Ident::new(
+        &format!("{}_get_response_rx", field_name_str),
+        field_name.span(),
+    );
+    let client_method = quote! {
+        pub async fn #getter_name(&self) -> #field_type {
+            embassy_sync::channel::Sender::send(&self.#input_channel_tx_name, ()).await;
+            embassy_sync::channel::Receiver::receive(&self.#output_channel_rx_name).await
+        }
+    };
+
+    let client_tx_rx_declarations = quote! {
+        #input_channel_tx_name: embassy_sync::channel::Sender<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            (),
+            #capacity,
+        >,
+        #output_channel_rx_name: embassy_sync::channel::Receiver<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            #field_type,
+            #capacity,
+        >,
+    };
+
+    let client_tx_rx_initializations = quote! {
+        #input_channel_tx_name: embassy_sync::channel::Channel::sender(&#input_channel_name),
+        #output_channel_rx_name: embassy_sync::channel::Channel::receiver(&#output_channel_name),
+    };
+
+    PubGetter {
         channel_declarations,
         rx_tx,
         select_arm,

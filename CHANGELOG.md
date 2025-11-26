@@ -1,3 +1,21 @@
+# 0.4.0 (Nov 26th, 2025)
+
+## Breaking Changes
+
+* Published field streams now yield the current value on first poll, then subsequent changes.
+* Published field streams' item type is now the raw field type (e.g., `State`) instead of
+  `*Changed` struct with `previous` and `new` fields.
+* The `pub_setter` sub-attribute on `publish` has been removed. Use the new independent `setter`
+  attribute instead (e.g., `#[controller(publish, setter)]`).
+
+## New Features
+
+* New `getter` attribute for fields: generates a client-side getter method. Supports custom naming
+  via `#[controller(getter = "custom_name")]`.
+* New `setter` attribute for fields: generates a client-side setter method independent of `publish`.
+  Supports custom naming via `#[controller(setter = "custom_name")]`. Can be combined with `publish`
+  to also broadcast changes.
+
 # 0.3.0 (Nov 25th, 2025)
 
 * Macro now operates on a module. This allows the macro to have a visibility on both the struct and

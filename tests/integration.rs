@@ -25,10 +25,11 @@ mod test_controller {
     use super::*;
 
     pub struct Controller {
-        #[controller(publish)]
+        #[controller(publish, getter = "get_current_state", setter = "change_state")]
         state: State,
-        #[controller(publish(pub_setter))]
+        #[controller(publish, getter, setter)]
         mode: Mode,
+        #[controller(setter)]
         counter: u32,
     }
 
@@ -93,6 +94,13 @@ fn test_controller_basic_functionality() {
         // Test 1: Subscribe to state changes.
         let mut state_stream = client.receive_state_changed().expect("Failed to subscribe");
 
+        // Test 1a: First poll returns the initial (current) value.
+        let initial_state = state_stream
+            .next()
+            .await
+            .expect("Should receive initial state");
+        assert_eq!(initial_state, State::Idle, "Initial state should be Idle");
+
         // Test 2: Subscribe to signals.
         let mut error_stream = client
             .receive_error_occurred()
@@ -119,21 +127,12 @@ fn test_controller_basic_functionality() {
             "Activate should succeed from Idle state"
         );
 
-        // Verify we received the state change.
-        let state_change = state_stream
+        // Verify we received the state change (raw value, not Changed struct).
+        let new_state = state_stream
             .next()
             .await
             .expect("Should receive state change");
-        assert_eq!(
-            state_change.previous,
-            State::Idle,
-            "Previous state should be Idle"
-        );
-        assert_eq!(
-            state_change.new,
-            State::Active,
-            "New state should be Active"
-        );
+        assert_eq!(new_state, State::Active, "New state should be Active");
 
         // Verify we received the operation_complete signal.
         let _complete = complete_stream
@@ -154,16 +153,11 @@ fn test_controller_basic_functionality() {
         );
 
         // Verify state changed to Error.
-        let state_change = state_stream
+        let new_state = state_stream
             .next()
             .await
             .expect("Should receive state change");
-        assert_eq!(
-            state_change.previous,
-            State::Active,
-            "Previous state should be Active"
-        );
-        assert_eq!(state_change.new, State::Error, "New state should be Error");
+        assert_eq!(new_state, State::Error, "New state should be Error");
 
         // Verify we received the error signal.
         let error_signal = error_stream
@@ -189,11 +183,33 @@ fn test_controller_basic_functionality() {
             "Should return InvalidState error"
         );
 
-        // Test 8: Use pub_setter to change mode.
+        // Test 8: Use setter to change mode.
         client.set_mode(Mode::Debug).await;
 
         // Test 9: Call method with no return value.
         client.return_nothing().await;
+
+        // Test 10: Use getter with custom name to get state.
+        let state = client.get_current_state().await;
+        assert_eq!(state, State::Error, "State should be Error");
+
+        // Test 11: Use getter with default field name to get mode.
+        let mode = client.mode().await;
+        assert_eq!(mode, Mode::Debug, "Mode should be Debug");
+
+        // Test 12: Use setter with custom name (new syntax).
+        client.change_state(State::Idle).await;
+        let state = client.get_current_state().await;
+        assert_eq!(
+            state,
+            State::Idle,
+            "State should be Idle after change_state"
+        );
+
+        // Test 13: Use setter without publish (independent setter).
+        client.set_counter(100).await;
+        let counter = client.get_counter().await;
+        assert_eq!(counter, 100, "Counter should be 100 after set_counter");
 
         // If we get here, all tests passed.
     });
