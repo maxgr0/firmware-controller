@@ -7,10 +7,7 @@ use syn::{spanned::Spanned, Field, Fields, Ident, ItemStruct, LitStr, Result, To
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedFieldInfo {
     pub field_name: Ident,
-    pub field_type: syn::Type,
-    pub setter_name: Ident,
     pub subscriber_struct_name: Ident,
-    pub pub_setter: bool,
 }
 
 /// Information about a field with a getter, to be used by impl processing.
@@ -21,11 +18,23 @@ pub(crate) struct GetterFieldInfo {
     pub getter_name: Ident,
 }
 
+/// Information about a field with a public setter, to be used by impl processing.
+#[derive(Debug, Clone)]
+pub(crate) struct SetterFieldInfo {
+    pub field_name: Ident,
+    pub field_type: syn::Type,
+    /// The public setter method name (client API).
+    pub setter_name: Ident,
+    /// If the field is published, the internal setter name to call. Otherwise None.
+    pub internal_setter_name: Option<Ident>,
+}
+
 /// Result of expanding a struct.
 pub(crate) struct ExpandedStruct {
     pub tokens: TokenStream,
     pub published_fields: Vec<PublishedFieldInfo>,
     pub getter_fields: Vec<GetterFieldInfo>,
+    pub setter_fields: Vec<SetterFieldInfo>,
 }
 
 pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
@@ -90,6 +99,35 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
         })
         .collect();
 
+    // Collect setter field info.
+    let setter_fields_info: Vec<SetterFieldInfo> = struct_fields
+        .with_setter()
+        .map(|f| {
+            let field_name = f.field.ident.as_ref().unwrap().clone();
+            let field_type = f.field.ty.clone();
+            // Use explicit setter name if provided, otherwise default to set_<field_name>.
+            let setter_name =
+                f.attrs.setter_name.clone().unwrap_or_else(|| {
+                    Ident::new(&format!("set_{}", field_name), field_name.span())
+                });
+            // If published, use the internal setter; otherwise set field directly.
+            let internal_setter_name = if f.attrs.publish {
+                Some(Ident::new(
+                    &format!("set_{}", field_name),
+                    field_name.span(),
+                ))
+            } else {
+                None
+            };
+            SetterFieldInfo {
+                field_name,
+                field_type,
+                setter_name,
+                internal_setter_name,
+            }
+        })
+        .collect();
+
     let fields = struct_fields.raw_fields().collect::<Vec<_>>();
     let vis = &input.vis;
 
@@ -118,6 +156,7 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
         },
         published_fields: published_fields_info,
         getter_fields: getter_fields_info,
+        setter_fields: setter_fields_info,
     })
 }
 
@@ -126,10 +165,12 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
 struct ControllerAttrs {
     /// Whether the field has `publish` attribute.
     publish: bool,
-    /// Whether the field has `pub_setter` (inside publish).
+    /// Whether the field has `pub_setter` (inside publish) - for backwards compatibility.
     pub_setter: bool,
     /// If set, the getter method name (from `getter` or `getter = "name"`).
     getter_name: Option<Ident>,
+    /// If set, the setter method name (from `setter` or `setter = "name"`).
+    setter_name: Option<Ident>,
 }
 
 /// Parsed struct fields.
@@ -177,6 +218,13 @@ impl StructFields {
     fn with_getter(&self) -> impl Iterator<Item = &StructField> {
         self.fields.iter().filter(|f| f.attrs.getter_name.is_some())
     }
+
+    /// All fields with setters (either via `setter` attribute or `pub_setter` inside `publish`).
+    fn with_setter(&self) -> impl Iterator<Item = &StructField> {
+        self.fields
+            .iter()
+            .filter(|f| f.attrs.setter_name.is_some() || f.attrs.pub_setter)
+    }
 }
 
 /// A struct field with its parsed controller attributes and generated code.
@@ -196,7 +244,7 @@ impl StructField {
         let attrs = parse_controller_attrs(field)?;
 
         let published = if attrs.publish {
-            Some(generate_publish_code(field, struct_name, attrs.pub_setter)?)
+            Some(generate_publish_code(field, struct_name)?)
         } else {
             None
         };
@@ -269,9 +317,22 @@ fn parse_controller_attrs(field: &mut Field) -> Result<ControllerAttrs> {
             } else {
                 attrs.getter_name = Some(field_name.clone());
             }
+        } else if meta.path.is_ident("setter") {
+            let field_name = field.ident.as_ref().unwrap();
+            if meta.input.peek(Token![=]) {
+                meta.input.parse::<Token![=]>()?;
+                let name: LitStr = meta.input.parse()?;
+                attrs.setter_name = Some(Ident::new(&name.value(), name.span()));
+            } else {
+                let default_name = format!("set_{}", field_name);
+                attrs.setter_name = Some(Ident::new(&default_name, field_name.span()));
+            }
         } else {
             let ident = meta.path.get_ident().unwrap();
-            let e = format!("expected `publish` or `getter`, found `{}`", ident);
+            let e = format!(
+                "expected `publish`, `getter`, or `setter`, found `{}`",
+                ident
+            );
             return Err(syn::Error::new_spanned(ident, e));
         }
 
@@ -287,11 +348,7 @@ fn parse_controller_attrs(field: &mut Field) -> Result<ControllerAttrs> {
 }
 
 /// Generate code for a published field.
-fn generate_publish_code(
-    field: &Field,
-    struct_name: &Ident,
-    pub_setter: bool,
-) -> Result<PublishedFieldCode> {
+fn generate_publish_code(field: &Field, struct_name: &Ident) -> Result<PublishedFieldCode> {
     let struct_name_str = struct_name.to_string();
     let field_name = field.ident.as_ref().unwrap();
     let field_name_str = field_name.to_string();
@@ -401,10 +458,7 @@ fn generate_publish_code(
 
     let info = PublishedFieldInfo {
         field_name: field_name.clone(),
-        field_type: ty.clone(),
-        setter_name,
         subscriber_struct_name,
-        pub_setter,
     };
 
     Ok(PublishedFieldCode {

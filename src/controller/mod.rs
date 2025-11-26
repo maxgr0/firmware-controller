@@ -78,6 +78,7 @@ pub(crate) fn expand_module(input: ItemMod) -> Result<TokenStream> {
         impl_item,
         &expanded_struct.published_fields,
         &expanded_struct.getter_fields,
+        &expanded_struct.setter_fields,
     )?;
     let struct_tokens = expanded_struct.tokens;
 

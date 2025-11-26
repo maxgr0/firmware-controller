@@ -25,10 +25,11 @@ mod test_controller {
     use super::*;
 
     pub struct Controller {
-        #[controller(publish, getter = "get_current_state")]
+        #[controller(publish, getter = "get_current_state", setter = "change_state")]
         state: State,
         #[controller(publish(pub_setter), getter)]
         mode: Mode,
+        #[controller(setter)]
         counter: u32,
     }
 
@@ -189,7 +190,7 @@ fn test_controller_basic_functionality() {
             "Should return InvalidState error"
         );
 
-        // Test 8: Use pub_setter to change mode.
+        // Test 8: Use pub_setter to change mode (backwards compatibility).
         client.set_mode(Mode::Debug).await;
 
         // Test 9: Call method with no return value.
@@ -202,6 +203,20 @@ fn test_controller_basic_functionality() {
         // Test 11: Use getter with default field name to get mode.
         let mode = client.mode().await;
         assert_eq!(mode, Mode::Debug, "Mode should be Debug");
+
+        // Test 12: Use setter with custom name (new syntax).
+        client.change_state(State::Idle).await;
+        let state = client.get_current_state().await;
+        assert_eq!(
+            state,
+            State::Idle,
+            "State should be Idle after change_state"
+        );
+
+        // Test 13: Use setter without publish (independent setter).
+        client.set_counter(100).await;
+        let counter = client.get_counter().await;
+        assert_eq!(counter, 100, "Counter should be 100 after set_counter");
 
         // If we get here, all tests passed.
     });

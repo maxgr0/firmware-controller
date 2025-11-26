@@ -7,13 +7,14 @@ use syn::{
     Attribute, Ident, ImplItem, ImplItemFn, ItemImpl, Result, Signature, Token, Visibility,
 };
 
-use crate::controller::item_struct::{GetterFieldInfo, PublishedFieldInfo};
+use crate::controller::item_struct::{GetterFieldInfo, PublishedFieldInfo, SetterFieldInfo};
 use crate::util::snake_to_pascal_case;
 
 pub(crate) fn expand(
     mut input: ItemImpl,
     published_fields: &[PublishedFieldInfo],
     getter_fields: &[GetterFieldInfo],
+    setter_fields: &[SetterFieldInfo],
 ) -> Result<TokenStream> {
     let struct_name = get_struct_name(&input)?;
     let struct_name_str = struct_name.to_string();
@@ -33,10 +34,9 @@ pub(crate) fn expand(
     let args_channels_rx_tx = methods.clone().map(|m| &m.args_channels_rx_tx);
     let select_arms = methods.clone().map(|m| &m.select_arm);
 
-    // Generate public setters for published fields with pub_setter.
-    let pub_setters: Vec<_> = published_fields
+    // Generate public setters for fields with setter attribute.
+    let pub_setters: Vec<_> = setter_fields
         .iter()
-        .filter(|field| field.pub_setter)
         .map(|field| generate_pub_setter(field, &struct_name))
         .collect();
     let pub_setter_channel_declarations = pub_setters.iter().map(|s| &s.channel_declarations);
@@ -633,7 +633,7 @@ struct PubGetter {
     client_tx_rx_initializations: TokenStream,
 }
 
-fn generate_pub_setter(field: &PublishedFieldInfo, struct_name: &Ident) -> PubSetter {
+fn generate_pub_setter(field: &SetterFieldInfo, struct_name: &Ident) -> PubSetter {
     let field_name = &field.field_name;
     let field_type = &field.field_type;
     let setter_method_name = &field.setter_name;
@@ -678,13 +678,27 @@ fn generate_pub_setter(field: &PublishedFieldInfo, struct_name: &Ident) -> PubSe
         let #output_channel_tx_name = embassy_sync::channel::Channel::sender(&#output_channel_name);
     };
 
-    let select_arm = quote! {
-        value = futures::FutureExt::fuse(
-            embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
-        ) => {
-            self.#setter_method_name(value).await;
+    let select_arm = if let Some(internal_setter) = &field.internal_setter_name {
+        // Published field: call the internal setter which broadcasts changes.
+        quote! {
+            value = futures::FutureExt::fuse(
+                embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
+            ) => {
+                self.#internal_setter(value).await;
 
-            embassy_sync::channel::Sender::send(&#output_channel_tx_name, ()).await;
+                embassy_sync::channel::Sender::send(&#output_channel_tx_name, ()).await;
+            }
+        }
+    } else {
+        // Non-published field: set the field directly.
+        quote! {
+            value = futures::FutureExt::fuse(
+                embassy_sync::channel::Receiver::receive(&#input_channel_rx_name),
+            ) => {
+                self.#field_name = value;
+
+                embassy_sync::channel::Sender::send(&#output_channel_tx_name, ()).await;
+            }
         }
     };
 
