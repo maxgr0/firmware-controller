@@ -27,7 +27,7 @@ mod test_controller {
     pub struct Controller {
         #[controller(publish, getter = "get_current_state", setter = "change_state")]
         state: State,
-        #[controller(publish(pub_setter), getter)]
+        #[controller(publish, getter, setter)]
         mode: Mode,
         #[controller(setter)]
         counter: u32,
@@ -183,7 +183,7 @@ fn test_controller_basic_functionality() {
             "Should return InvalidState error"
         );
 
-        // Test 8: Use pub_setter to change mode (backwards compatibility).
+        // Test 8: Use setter to change mode.
         client.set_mode(Mode::Debug).await;
 
         // Test 9: Call method with no return value.

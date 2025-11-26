@@ -177,8 +177,6 @@ pub(crate) fn expand(mut input: ItemStruct) -> Result<ExpandedStruct> {
 struct ControllerAttrs {
     /// Whether the field has `publish` attribute.
     publish: bool,
-    /// Whether the field has `pub_setter` (inside publish) - for backwards compatibility.
-    pub_setter: bool,
     /// If set, the getter method name (from `getter` or `getter = "name"`).
     getter_name: Option<Ident>,
     /// If set, the setter method name (from `setter` or `setter = "name"`).
@@ -231,11 +229,9 @@ impl StructFields {
         self.fields.iter().filter(|f| f.attrs.getter_name.is_some())
     }
 
-    /// All fields with setters (either via `setter` attribute or `pub_setter` inside `publish`).
+    /// All fields with setters (via `setter` attribute).
     fn with_setter(&self) -> impl Iterator<Item = &StructField> {
-        self.fields
-            .iter()
-            .filter(|f| f.attrs.setter_name.is_some() || f.attrs.pub_setter)
+        self.fields.iter().filter(|f| f.attrs.setter_name.is_some())
     }
 }
 
@@ -301,25 +297,6 @@ fn parse_controller_attrs(field: &mut Field) -> Result<ControllerAttrs> {
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("publish") {
             attrs.publish = true;
-
-            // Parse nested attributes like `publish(pub_setter)`.
-            if meta.input.peek(syn::token::Paren) {
-                let content;
-                syn::parenthesized!(content in meta.input);
-                while !content.is_empty() {
-                    let nested_ident: Ident = content.parse()?;
-                    if nested_ident == "pub_setter" {
-                        attrs.pub_setter = true;
-                    } else {
-                        let e = format!("expected `pub_setter`, found `{}`", nested_ident);
-                        return Err(syn::Error::new_spanned(&nested_ident, e));
-                    }
-
-                    if !content.is_empty() {
-                        content.parse::<Token![,]>()?;
-                    }
-                }
-            }
         } else if meta.path.is_ident("getter") {
             let field_name = field.ident.as_ref().unwrap();
             if meta.input.peek(Token![=]) {
